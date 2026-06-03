@@ -5,7 +5,7 @@
 
   <p align="center">
     <a href="#installation"><img src="https://img.shields.io/badge/Python-3.10-brightgreen.svg?logo=python&logoColor=white" alt="Python"></a>
-    <a href="#"><img src="https://img.shields.io/badge/Arxiv-Coming Soon-b31b1b.svg?logo=arXiv" alt="arXiv"></a>
+    <a href="https://arxiv.org/abs/2606.03455"><img src="https://img.shields.io/badge/Arxiv-2606.03455-b31b1b.svg?logo=arXiv" alt="arXiv"></a>
     <a href="https://wavtts.github.io/"><img src="https://img.shields.io/badge/🌐%20Demo-Page-orange.svg" alt="Demo"></a>
     <a href="https://huggingface.co/worstchan/WavTTS"><img src="https://img.shields.io/badge/🤗%20HuggingFace-Models-yellow.svg" alt="HuggingFace"></a>
   </p>
@@ -18,8 +18,7 @@
 
 ## 📖 Introduction
 
-WavTTS is an end-to-end zero-shot TTS framework that generates speech directly in the raw waveform space, without relying on intermediate acoustic representations such as mel-spectrograms, VAE latents, or codec tokens. Built on flow matching with DiT, WavTTS combines waveform patchification, multi-scale mel-spectrogram supervision, and optimized noise scheduling to achieve high-quality waveform generation.
-<!-- For more details, please refer to our paper: [WavTTS: Towards High-Quality Zero-Shot TTS via Direct Raw Waveform Modeling](https://arxiv.org/abs/2605.00000). -->
+WavTTS is an end-to-end zero-shot TTS framework that generates speech directly in the raw waveform space, without relying on intermediate acoustic representations such as mel-spectrograms, VAE latents, or codec tokens. Built on flow matching with DiT, WavTTS combines waveform patchification, multi-scale mel-spectrogram supervision, and optimized noise scheduling to achieve high-quality waveform generation. For more details, please refer to our paper: [WavTTS: Towards High-Quality Zero-Shot TTS via Direct Raw Waveform Modeling](https://arxiv.org/abs/2606.03455).
 
 <div align="center">
   <img src="docs/static/images/wavtts_pipeline.png" alt="WavTTS pipeline" width="85%">
@@ -29,7 +28,7 @@ WavTTS is an end-to-end zero-shot TTS framework that generates speech directly i
 
 ## 🚀 News
 
-- **[2026-05-31]**: We have released the WavTTS codebase along with the official 16 kHz checkpoint. Please note that this project is still under active development, and we will continue to roll out updates and improvements.
+- **[2026-06-03]**: We have released the WavTTS codebase along with the official 16 kHz checkpoint. Please note that this project is still under active development, and we will continue to roll out updates and improvements.
 
 
 
