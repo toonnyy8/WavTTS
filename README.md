@@ -7,7 +7,8 @@
     <a href="#installation"><img src="https://img.shields.io/badge/Python-3.10-brightgreen.svg?logo=python&logoColor=white" alt="Python"></a>
     <a href="https://arxiv.org/abs/2606.03455"><img src="https://img.shields.io/badge/Arxiv-2606.03455-b31b1b.svg?logo=arXiv" alt="arXiv"></a>
     <a href="https://wavtts.github.io/"><img src="https://img.shields.io/badge/🌐%20Demo-Page-orange.svg" alt="Demo"></a>
-    <a href="https://huggingface.co/worstchan/WavTTS"><img src="https://img.shields.io/badge/🤗%20HuggingFace-Models-yellow.svg" alt="HuggingFace"></a>
+    <a href="https://huggingface.co/worstchan/WavTTS"><img src="https://img.shields.io/badge/🤗%20HF-Models-yellow.svg" alt="HF Models"></a>
+    <a href="https://huggingface.co/spaces/chenxie95/WavTTS"><img src="https://img.shields.io/badge/🤗%20HF-Space-blue.svg" alt="HF Space"></a>
   </p>
 
   <p align="center">
