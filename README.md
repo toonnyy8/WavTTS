@@ -146,14 +146,11 @@ If you encounter general pipeline or environment issues, we recommend first chec
 If you find this work useful in your research, please consider citing our paper:
 
 ```bibtex
-@misc{chen2026wavttshighqualityzeroshottts,
-      title={WavTTS: Towards High-Quality Zero-Shot TTS via Direct Raw Waveform Modeling}, 
-      author={Wenxi Chen and Dongya Jia and Yushen Chen and Zhikang Niu and Yuzhe Liang and Xiquan Li and Ruiqi Yan and Ziyang Ma and Guanrou Yang and Sanyuan Chen and Yue Wang and Zhuo Chen and Kai Yu and Xie Chen},
-      year={2026},
-      eprint={2606.03455},
-      archivePrefix={arXiv},
-      primaryClass={eess.AS},
-      url={https://arxiv.org/abs/2606.03455}, 
+@article{chen2026wavtts,
+  title={WavTTS: Towards High-Quality Zero-Shot TTS via Direct Raw Waveform Modeling},
+  author={Chen, Wenxi and Jia, Dongya and Chen, Yushen and Niu, Zhikang and Liang, Yuzhe and Li, Xiquan and Yan, Ruiqi and Ma, Ziyang and Yang, Guanrou and Chen, Sanyuan and others},
+  journal={arXiv preprint arXiv:2606.03455},
+  year={2026}
 }
 ```
 
