@@ -241,6 +241,26 @@ def test_sample_uncond_cli(tmp_path):
     )
     wav_files = sorted(out_dir.glob("*.wav"))
     assert len(wav_files) == 2
-    info = torchaudio.info(str(wav_files[0]))
-    assert info.num_frames == 8000  # 0.5s @ 16k
-    assert info.sample_rate == 16000
+    loaded, sr = torchaudio.load(str(wav_files[0]))
+    assert loaded.shape == (1, 8000)  # 0.5s @ 16k
+    assert sr == 16000
+
+    # Test EMA checkpoint loading path
+    ema_state = {f"ema_model.{k}": v for k, v in model.state_dict().items()}
+    ema_state["initted"] = torch.tensor(True)
+    ema_state["step"] = torch.tensor(0)
+    ema_ckpt_path = tmp_path / "model_ema.pt"
+    torch.save({"ema_model_state_dict": ema_state}, str(ema_ckpt_path))
+    out_dir2 = tmp_path / "out_ema"
+    main(
+        [
+            "--ckpt", str(ema_ckpt_path),
+            "--config", str(cfg_path),
+            "--duration_sec", "0.5",
+            "--num", "1",
+            "--steps", "2",
+            "--seed", "0",
+            "--out_dir", str(out_dir2),
+        ]
+    )
+    assert len(sorted(out_dir2.glob("*.wav"))) == 1
