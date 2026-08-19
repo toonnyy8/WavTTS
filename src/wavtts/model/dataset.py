@@ -41,7 +41,6 @@ class CustomDataset(Dataset):
         while True:
             row = self.data[index]
             audio_path = row["audio_path"]
-            text = row["text"]
             duration = row["duration"]
 
             # filter by given length
@@ -66,7 +65,6 @@ class CustomDataset(Dataset):
 
         return {
             "wav": audio.squeeze(0),
-            "text": text,
         }
 
 
@@ -150,7 +148,6 @@ class DynamicBatchSampler(Sampler[list[int]]):
 
 def load_dataset(
     dataset_name: str,
-    tokenizer: str = "pinyin",
     dataset_type: str = "CustomDataset",
     audio_type: str = "raw",
     waveform_kwargs: dict = dict(),
@@ -158,7 +155,8 @@ def load_dataset(
     """
     WavTTS only supports raw waveform datasets.
     dataset_type:
-      - "CustomDataset": use tokenizer name and default data path
+      - "CustomDataset": use default data path data/{dataset_name}
+        (include any legacy tokenizer suffix, e.g. Emilia_ZH_EN_pinyin, in the name)
       - "CustomDatasetPath": pass the full path to a prepared dataset
     """
 
@@ -168,7 +166,7 @@ def load_dataset(
         raise ValueError("WavTTS only supports raw waveform datasets; audio_type must be 'raw'.")
 
     if dataset_type == "CustomDataset":
-        rel_data_path = str(files("wavtts").joinpath(f"../../data/{dataset_name}_{tokenizer}"))
+        rel_data_path = str(files("wavtts").joinpath(f"../../data/{dataset_name}"))
         try:
             train_dataset = load_from_disk(f"{rel_data_path}/raw")
         except:  # noqa: E722
@@ -199,31 +197,16 @@ def load_dataset(
 
 
 def collate_fn(batch):
-    text = [item["text"] for item in batch]
-    text_lengths = torch.LongTensor([len(item) for item in text])
-    
     wavs = [item["wav"] for item in batch]
-    has_wav = wavs[0] is not None
-    if has_wav:
-        wav_lengths = torch.LongTensor([w.shape[0] for w in wavs])
-        max_wav_len = wav_lengths.max().item()
+    wav_lengths = torch.LongTensor([w.shape[0] for w in wavs])
+    max_wav_len = wav_lengths.max().item()
 
-        padded_wavs = []
-        for w in wavs:
-            pad_len = max_wav_len - w.shape[0]
-            padded_wavs.append(
-                F.pad(w, (0, pad_len), value=0.0)
-            )
-
-        wavs = torch.stack(padded_wavs)   # [B, T_wav]
-    else:
-        wavs = None
-        wav_lengths = None
-    
+    padded_wavs = []
+    for w in wavs:
+        pad_len = max_wav_len - w.shape[0]
+        padded_wavs.append(F.pad(w, (0, pad_len), value=0.0))
 
     return dict(
-        text=text,
-        text_lengths=text_lengths,
-        wav=wavs,
+        wav=torch.stack(padded_wavs),  # [B, T_wav]
         wav_lengths=wav_lengths,
     )

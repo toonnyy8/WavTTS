@@ -160,3 +160,14 @@ def test_sample_rejects_unknown_negative():
     model = make_model()
     with pytest.raises(ValueError):
         model.sample(8000, steps=2, negative="bogus")
+
+
+def test_collate_wav_only():
+    from wavtts.model.dataset import collate_fn
+
+    batch = [{"wav": torch.randn(1000)}, {"wav": torch.randn(800)}]
+    out = collate_fn(batch)
+    assert set(out.keys()) == {"wav", "wav_lengths"}
+    assert out["wav"].shape == (2, 1000)
+    assert out["wav_lengths"].tolist() == [1000, 800]
+    assert torch.equal(out["wav"][1, 800:], torch.zeros(200))
