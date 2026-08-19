@@ -8,7 +8,7 @@ from omegaconf import OmegaConf
 
 from wavtts.model import CFM, Trainer
 from wavtts.model.dataset import load_dataset
-from wavtts.model.utils import get_tokenizer
+from wavtts.model.utils import seed_everything
 
 
 os.chdir(str(files("wavtts").joinpath("../..")))  # change working directory to root of project (local editable)
@@ -16,29 +16,23 @@ os.chdir(str(files("wavtts").joinpath("../..")))  # change working directory to 
 
 @hydra.main(version_base="1.3", config_path=str(files("wavtts").joinpath("configs")), config_name=None)
 def main(model_cfg):
+    seed = int(model_cfg.get("seed", 666))
+    seed_everything(seed)  # run-level reproducibility (also sets cudnn deterministic)
+
     model_cls = hydra.utils.get_class(f"wavtts.model.{model_cfg.model.backbone}")
     model_arc = model_cfg.model.arch
-    tokenizer = model_cfg.model.tokenizer
     cfm_kwargs = getattr(model_cfg.model, "cfm", {}) or {}
 
     exp_name = model_cfg.ckpts.exp_name
     wandb_resume_id = None
 
-    # set text tokenizer
-    if tokenizer != "custom":
-        tokenizer_path = model_cfg.datasets.name
-    else:
-        tokenizer_path = model_cfg.model.tokenizer_path
-    vocab_char_map, vocab_size = get_tokenizer(tokenizer_path, tokenizer)
-
     # set model
     model = CFM(
-        transformer=model_cls(**model_arc, text_num_embeds=vocab_size, wav_frame_len=model_cfg.model.waveform.wav_frame_len),
+        transformer=model_cls(**model_arc, wav_frame_len=model_cfg.model.waveform.wav_frame_len),
         waveform_kwargs=model_cfg.model.waveform,
-        vocab_char_map=vocab_char_map,
         **cfm_kwargs,
     )
-    
+
     save_dir = model_cfg.ckpts.save_dir
     if os.path.isabs(save_dir):
         checkpoint_path = save_dir
@@ -65,15 +59,18 @@ def main(model_cfg):
         wandb_resume_id=wandb_resume_id,
         last_per_updates=model_cfg.ckpts.last_per_updates,
         log_samples=model_cfg.ckpts.log_samples,
+        log_samples_seeds=model_cfg.ckpts.log_samples_seeds,
+        log_samples_sec=model_cfg.ckpts.log_samples_sec,
+        spk_ckpt_path=model_cfg.ckpts.spk_ckpt_path,
         bnb_optimizer=model_cfg.optim.bnb_optimizer,
         model_cfg_dict=OmegaConf.to_container(model_cfg, resolve=True),
     )
 
-    train_dataset = load_dataset(model_cfg.datasets.name, tokenizer, waveform_kwargs=model_cfg.model.waveform)
+    train_dataset = load_dataset(model_cfg.datasets.name, waveform_kwargs=model_cfg.model.waveform)
     trainer.train(
         train_dataset,
         num_workers=model_cfg.datasets.num_workers,
-        resumable_with_seed=666,  # seed for shuffling dataset
+        resumable_with_seed=seed,  # seed for shuffling dataset
     )
 
 

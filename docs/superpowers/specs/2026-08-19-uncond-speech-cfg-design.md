@@ -94,8 +94,10 @@ label purity ever matters.`
 sample(duration, *, batch=1, steps=32, cfg_strength=2.0,
        negative="mixed",  # "mixed" | "null"
        sway_sampling_coef=None, timestep_mapping="sway_sampling",
-       timestep_power=None, shift=1.0, use_epss=True, seed=None)
+       timestep_power=None, shift=1.0, use_epss=True, seed=None,
+       solver="euler")  # "euler" | "dpmpp"
 # duration: 生成樣本點數（int，16kHz）
+# seed 使用獨立 torch.Generator，不會動到全域 RNG（訓練中途採樣安全）
 ```
 
 - `y0 = randn(batch, duration)`，無任何 cond 填充/遮罩/裁切邏輯。
@@ -103,6 +105,10 @@ sample(duration, *, batch=1, steps=32, cfg_strength=2.0,
   正分支 `clean`、負分支 `negative` 對應的 state，
   `v = v_pos + cfg_strength · (v_pos − v_neg)`。
 - timestep mapping（sway/EPSS/power/shift）與 Euler odeint 照舊。
+- `solver="dpmpp"` 改用 DPM-Solver++(2M)（data-prediction 多步法）：對 rectified-flow
+  插值取 `α_t=t, σ_t=1−t, λ_t=log(t/(1−t))`，端點以 `t_eps` 夾住奇異點，
+  末步直接輸出 x_pred；每步由 CFG 後的 v 轉 `x_pred = x + (1−t)v`，
+  CFG 組合程式碼與 Euler 路徑完全共用。可搭配任一 timestep 排程。
 - 回傳 `out / latents_scale` 與 trajectory。
 
 ### `src/wavtts/model/dataset.py`
@@ -135,8 +141,47 @@ sample(duration, *, batch=1, steps=32, cfg_strength=2.0,
 ### 新增 `src/wavtts/infer/sample_uncond.py`
 
 極簡 CLI：`--ckpt --duration_sec 5 --num 4 --steps 32 --cfg_strength 2.0
---negative mixed --seed --out_dir`。載入 checkpoint（EMA state dict 優先）、
-建模型、`sample()`、`torchaudio.save`。
+--negative mixed --solver euler|dpmpp --seed --out_dir --device`。
+載入 checkpoint（EMA state dict 優先）、建模型、`sample()`、`torchaudio.save`。
+
+## 訓練監控、可重現性與 DPM++ 採樣器（2026-08-19 追加）
+
+### TensorBoard 監控（`trainer.py`、`train/metrics.py`）
+
+- config 預設 `ckpts.logger: tensorboard`（wandb 仍可用，切回後 gen 指標記 scalar、
+  音訊/圖僅存檔）；訓練結束 `writer.close()`。看板：`tensorboard --logdir runs`。
+- 每次 checkpoint（`save_per_updates`）在主進程生成固定樣本並記錄：
+  - `gen/audio_seed{k}`：音訊；`gen/mel_seed{k}`：log-mel 圖
+    （torchaudio 80 mels + matplotlib，`add_figure`）。
+  - wav 檔另存 `samples/update_{n}_seed{k}.wav`。
+
+### 量化指標（`src/wavtts/train/metrics.py`，對所有 clip 取平均記 scalar）
+
+| 指標 | 說明 | 依賴 |
+|---|---|---|
+| `gen/utmos` | UTMOS 預測 MOS（1–5），自然度單一數字 | torch.hub lazy 載入，失敗自動跳過 |
+| `gen/silence_ratio` | 低能量 frame 佔比（崩成靜音的警報） | 純 torch |
+| `gen/clipping_rate` | \|x\|>0.99 樣本比例（爆音警報） | 純 torch |
+| `gen/rms` | 整體能量漂移 | 純 torch |
+| `gen/spk_sim_self` | 前後半 ECAPA embedding cosine——語者一致性 直接指標 | opt-in：`ckpts.spk_ckpt_path`（WavLM-large ECAPA ckpt，同 eval 用），null 停用 |
+
+指標一律 fail-safe：任何載入/計算失敗只印警告並跳過，不中斷訓練。
+
+### 可重現性
+
+- config 頂層 `seed: 666`：`train.py` 進 main 即呼叫既有 `seed_everything(seed)`
+  （python/torch/cuda seed + `cudnn.deterministic`，訓練略慢但 run 級可重現），
+  dataset shuffle 的 `resumable_with_seed` 同一值。
+- **固定 seed 中間結果**：`ckpts.log_samples_seeds: [0, 1, 2, 3]`、
+  `ckpts.log_samples_sec: 5`——每個 checkpoint 用同一組 seed、同一長度各生成一條，
+  seed↔clip 對應固定，跨 checkpoint 可直接對照同一條 clip 的演化。
+- `CFM.sample(seed=...)` 改用獨立 `torch.Generator`（原 `torch.manual_seed` 會
+  重置全域 RNG，破壞訓練可重現性；已修並有測試鎖定）。
+
+### DPM-Solver++(2M)
+
+見上方 `sample(...)` 一節的 `solver="dpmpp"` 說明；trainer 的 checkpoint 採樣
+維持 Euler（32 步）。
 
 ## 驗證
 
@@ -147,6 +192,10 @@ sample(duration, *, batch=1, steps=32, cfg_strength=2.0,
   assert loss 有限、梯度存在。
 - `sample(duration=8000, steps=2)`，assert 輸出 shape `[batch, 8000]` 且有限，
   分別測 `negative="mixed"` 與 `"null"` 與 `cfg_strength=0`。
+- 追加：dpmpp solver（有/無 CFG）shape 與有限性、未知 solver 拒絕、
+  `sample(seed=...)` 不動全域 RNG 且同 seed 輸出確定、訊號指標
+  （silence/clipping/rms）數值正確、mel 圖可產生、CLI 端到端
+  （model_state_dict 與 EMA checkpoint 兩種載入路徑）。
 
 ## 風險與備註
 
@@ -158,3 +207,5 @@ sample(duration, *, batch=1, steps=32, cfg_strength=2.0,
   concat 型態與語者漂移失效模式最直接對應。
 - 混合用等功率係數（`sqrt(1−λ)`, `sqrt(λ)`）避免破音；不做響度對齊
   （Emilia 已大致正規化）。
+- batch-roll partner 可能偶爾是同語者（batch 依長度排序、非 speaker-disjoint），
+  少量實質乾淨樣本會掛 mixed 標記；升級路徑同 padding 尾端限制——dataset 層配對載入。
