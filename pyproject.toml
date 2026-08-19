@@ -7,6 +7,7 @@ name = "wavtts"
 version = "1.1.10"
 description = "WavTTS: Towards High-Quality Zero-Shot TTS via Direct Raw Waveform Modeling"
 readme = "README.md"
+requires-python = ">=3.10"
 license = {text = "MIT License"}
 classifiers = [
     "License :: OSI Approved :: MIT License",
@@ -43,16 +44,19 @@ dependencies = [
     "unidecode",
     "wandb",
     "x-transformers>=1.31.14",
+    "tensorboard>=2.21.0",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pytest",
 ]
+
+[project.optional-dependencies]
 eval = [
-    "faster_whisper==0.10.1",
+    "faster_whisper>=1.0.0",  # 0.10.1 pinned av==10, which has no wheels and needs system ffmpeg
     "funasr",
-    "jiwer==3.1.0",
+    "jiwer>=3.1.0",
     "modelscope",
     "zhconv",
     "zhon",
