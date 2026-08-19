@@ -237,6 +237,7 @@ def test_sample_uncond_cli(tmp_path):
             "--steps", "2",
             "--seed", "0",
             "--out_dir", str(out_dir),
+            "--device", "cpu",
         ]
     )
     wav_files = sorted(out_dir.glob("*.wav"))
@@ -261,6 +262,7 @@ def test_sample_uncond_cli(tmp_path):
             "--steps", "2",
             "--seed", "0",
             "--out_dir", str(out_dir2),
+            "--device", "cpu",
         ]
     )
     assert len(sorted(out_dir2.glob("*.wav"))) == 1

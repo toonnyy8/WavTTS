@@ -5,7 +5,7 @@ from torch.utils.data import SequentialSampler
 from wavtts.model.dataset import DynamicBatchSampler, load_dataset
 
 
-train_dataset = load_dataset("Emilia_ZH_EN", "pinyin")
+train_dataset = load_dataset("Emilia_ZH_EN")
 sampler = SequentialSampler(train_dataset)
 
 gpus = 8

@@ -158,3 +158,5 @@ sample(duration, *, batch=1, steps=32, cfg_strength=2.0,
   concat 型態與語者漂移失效模式最直接對應。
 - 混合用等功率係數（`sqrt(1−λ)`, `sqrt(λ)`）避免破音；不做響度對齊
   （Emilia 已大致正規化）。
+- batch-roll partner 可能偶爾是同語者（batch 依長度排序、非 speaker-disjoint），
+  少量實質乾淨樣本會掛 mixed 標記；升級路徑同 padding 尾端限制——dataset 層配對載入。

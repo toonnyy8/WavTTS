@@ -50,11 +50,12 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--negative", choices=["mixed", "null"], default="mixed")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--out_dir", default="samples_uncond")
+    parser.add_argument("--device", default=None, help="cpu | cuda | cuda:N (default: auto)")
     args = parser.parse_args(argv)
 
     config_path = args.config or str(files("wavtts").joinpath("configs/WavTTS.yaml"))
     cfg = OmegaConf.load(config_path)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     model = load_model(args.ckpt, cfg, device)
 
