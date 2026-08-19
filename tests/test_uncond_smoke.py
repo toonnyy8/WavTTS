@@ -266,3 +266,52 @@ def test_sample_uncond_cli(tmp_path):
         ]
     )
     assert len(sorted(out_dir2.glob("*.wav"))) == 1
+
+
+@pytest.mark.parametrize("cfg_strength", [2.0, 0.0])
+def test_sample_dpmpp(cfg_strength):
+    model = make_model()
+    out, trajectory = model.sample(8000, batch=2, steps=4, cfg_strength=cfg_strength, solver="dpmpp", seed=0)
+    assert out.shape == (2, 8000)
+    assert torch.isfinite(out).all()
+    assert trajectory.shape[0] == 5  # steps+1 states
+
+
+def test_sample_rejects_unknown_solver():
+    model = make_model()
+    with pytest.raises(ValueError):
+        model.sample(8000, steps=2, solver="bogus")
+
+
+def test_sample_seed_is_isolated_and_deterministic():
+    model = make_model()
+    torch.manual_seed(123)
+    expected = torch.rand(3)
+    torch.manual_seed(123)
+    out1, _ = model.sample(3200, steps=2, seed=7)
+    after = torch.rand(3)
+    assert torch.equal(expected, after)  # sampling with seed must not touch global RNG
+    out2, _ = model.sample(3200, steps=2, seed=7)
+    assert torch.equal(out1, out2)  # same seed, same clip
+
+
+def test_signal_metrics():
+    from wavtts.train.metrics import clipping_rate, rms, silence_ratio
+
+    silent = torch.zeros(16000)
+    assert silence_ratio(silent) == 1.0
+    assert clipping_rate(silent) == 0.0
+    loud = torch.ones(16000)
+    assert silence_ratio(loud) == 0.0
+    assert clipping_rate(loud) == 1.0
+    assert abs(rms(loud) - 1.0) < 1e-6
+
+
+def test_mel_figure():
+    import matplotlib.pyplot as plt
+
+    from wavtts.train.metrics import mel_figure
+
+    fig = mel_figure(torch.randn(8000))
+    assert fig is not None
+    plt.close(fig)

@@ -48,6 +48,7 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--steps", type=int, default=32)
     parser.add_argument("--cfg_strength", type=float, default=2.0)
     parser.add_argument("--negative", choices=["mixed", "null"], default="mixed")
+    parser.add_argument("--solver", choices=["euler", "dpmpp"], default="euler")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--out_dir", default="samples_uncond")
     parser.add_argument("--device", default=None, help="cpu | cuda | cuda:N (default: auto)")
@@ -71,6 +72,7 @@ def main(argv: list[str] | None = None):
             cfg_strength=args.cfg_strength,
             negative=args.negative,
             seed=args.seed,
+            solver=args.solver,
         )
 
     for i in range(args.num):

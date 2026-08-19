@@ -173,6 +173,38 @@ class CFM(nn.Module):
         # switch to dataset-level pair loading if label purity ever matters.
         return x1, state
 
+    def _dpmpp_2m(self, fn, y0, t):
+        """DPM-Solver++(2M) multistep, data-prediction form, for the rectified-flow
+        interpolant x_t = (1-t)·x0 + t·x1 (alpha_t = t, sigma_t = 1-t,
+        lambda_t = log(t / (1-t)), endpoints clamped by t_eps). fn returns v;
+        x_pred = x + (1-t)·v reuses the CFG combination unchanged."""
+        eps = self.t_eps
+
+        def lam(s: float) -> float:
+            s = min(max(s, eps), 1.0 - eps)
+            return math.log(s / (1.0 - s))
+
+        x = y0
+        states = [x]
+        x_pred_prev, h_prev = None, None
+        for i in range(len(t) - 1):
+            t_cur, t_next = float(t[i]), float(t[i + 1])
+            v = fn(t[i], x)
+            x_pred = x + (1.0 - t_cur) * v
+            if t_next >= 1.0 - eps:  # final step lands on the data prediction
+                x = x_pred
+            else:
+                h = lam(t_next) - lam(t_cur)
+                if x_pred_prev is None:
+                    d = x_pred  # first step: first-order (DPM-Solver++(1))
+                else:
+                    r = h_prev / h
+                    d = (1.0 + 1.0 / (2.0 * r)) * x_pred - (1.0 / (2.0 * r)) * x_pred_prev
+                x = ((1.0 - t_next) / (1.0 - t_cur)) * x - t_next * math.expm1(-h) * d
+                x_pred_prev, h_prev = x_pred, h
+            states.append(x)
+        return torch.stack(states)
+
     @torch.no_grad()
     def sample(
         self,
@@ -188,11 +220,14 @@ class CFM(nn.Module):
         shift: float = 1.0,
         use_epss: bool = True,
         seed: int | None = None,
+        solver: str = "euler",  # "euler" | "dpmpp"
     ):
         self.eval()
         device = self.device
         dtype = next(self.parameters()).dtype
 
+        if solver not in ("euler", "dpmpp"):
+            raise ValueError(f"Unknown solver: {solver}")
         if negative == "mixed":
             neg_id = STATE_MIXED
         elif negative == "null":
@@ -205,9 +240,13 @@ class CFM(nn.Module):
         requested = int(duration)
         aligned = int(math.ceil(requested / self.wav_frame_len) * self.wav_frame_len)
 
+        # dedicated generator: sampling with a fixed seed must not perturb the
+        # global RNG (e.g. mid-training checkpoint sampling)
+        generator = None
         if exists(seed):
-            torch.manual_seed(seed)
-        y0 = torch.randn(batch, aligned, device=device, dtype=dtype)
+            generator = torch.Generator(device=device)
+            generator.manual_seed(int(seed))
+        y0 = torch.randn(batch, aligned, device=device, dtype=dtype, generator=generator)
 
         def fn(t, x):
             def to_v(pred):
@@ -248,10 +287,13 @@ class CFM(nn.Module):
         if shift != 1.0:
             t = t / (t + shift * (1 - t))
 
-        # WavTTS inference uses Euler ODE sampling.
-        odeint_kwargs = dict(self.odeint_kwargs)
-        odeint_kwargs["method"] = "euler"
-        trajectory = odeint(fn, y0, t, **odeint_kwargs)
+        if solver == "dpmpp":
+            trajectory = self._dpmpp_2m(fn, y0, t)
+        else:
+            # WavTTS default inference uses Euler ODE sampling.
+            odeint_kwargs = dict(self.odeint_kwargs)
+            odeint_kwargs["method"] = "euler"
+            trajectory = odeint(fn, y0, t, **odeint_kwargs)
 
         out = trajectory[-1] / self.latents_scale
         return out[:, :requested], trajectory
