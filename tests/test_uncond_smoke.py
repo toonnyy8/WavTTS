@@ -1,3 +1,4 @@
+import pytest
 import torch
 from torch import nn
 
@@ -133,3 +134,29 @@ def test_train_step_with_aux_mel_loss():
     assert torch.isfinite(loss)
     assert loss_dict["aux_mel_loss"].item() != 0.0
     loss.backward()
+
+
+@pytest.mark.parametrize(
+    "cfg_strength,negative",
+    [(2.0, "mixed"), (2.0, "null"), (0.0, "mixed")],
+)
+def test_sample_shapes(cfg_strength, negative):
+    model = make_model()
+    out, trajectory = model.sample(
+        8000, batch=2, steps=2, cfg_strength=cfg_strength, negative=negative, seed=0
+    )
+    assert out.shape == (2, 8000)
+    assert torch.isfinite(out).all()
+    assert trajectory.shape[0] == 3  # steps+1 個時間點
+
+
+def test_sample_duration_not_multiple_of_frame_len():
+    model = make_model()
+    out, _ = model.sample(8123, batch=1, steps=2, seed=0)
+    assert out.shape == (1, 8123)
+
+
+def test_sample_rejects_unknown_negative():
+    model = make_model()
+    with pytest.raises(ValueError):
+        model.sample(8000, steps=2, negative="bogus")
