@@ -1,149 +1,115 @@
 <div align="center">
   <h1>
-  WavTTS: Towards High-Quality Zero-Shot TTS via Direct Raw Waveform Modeling
-  </h1> 
+  WavTTS-Uncond: Unconditional Raw-Waveform Speech Generation with Mixed-Speech Negative CFG
+  </h1>
 
   <p align="center">
-    <a href="#installation"><img src="https://img.shields.io/badge/Python-3.10-brightgreen.svg?logo=python&logoColor=white" alt="Python"></a>
-    <a href="https://arxiv.org/abs/2606.03455"><img src="https://img.shields.io/badge/Arxiv-2606.03455-b31b1b.svg?logo=arXiv" alt="arXiv"></a>
-    <a href="https://wavtts.github.io/"><img src="https://img.shields.io/badge/🌐%20Demo-Page-orange.svg" alt="Demo"></a>
-    <a href="https://huggingface.co/worstchan/WavTTS"><img src="https://img.shields.io/badge/🤗%20HF-Models-yellow.svg" alt="HF Models"></a>
-    <a href="https://huggingface.co/spaces/chenxie95/WavTTS"><img src="https://img.shields.io/badge/🤗%20HF-Space-blue.svg" alt="HF Space"></a>
+    <i>A research fork of <a href="https://github.com/cwx-worst-one/WavTTS">WavTTS</a> that turns the zero-shot TTS model into an unconditional speech generator, using speaker-inconsistent "mixed" negatives for classifier-free guidance.</i>
   </p>
-
-  <p align="center">
-    <i>End-to-end zero-shot TTS directly in the raw waveform space.</i>
-  </p>
-
 </div>
 
 ## 📖 Introduction
 
-WavTTS is an end-to-end zero-shot TTS framework that generates speech directly in the raw waveform space, without relying on intermediate acoustic representations such as mel-spectrograms, VAE latents, or codec tokens. Built on flow matching with DiT, WavTTS combines waveform patchification, multi-scale mel-spectrogram supervision, and optimized noise scheduling to achieve high-quality waveform generation. For more details, please refer to our paper: [WavTTS: Towards High-Quality Zero-Shot TTS via Direct Raw Waveform Modeling](https://arxiv.org/abs/2606.03455).
+This fork rewrites WavTTS into an **unconditional pure speech generation model** operating directly on raw 16 kHz waveforms with flow matching + DiT. All text and audio-prompt conditioning is removed; the only condition is a 3-value state embedding:
 
-<div align="center">
-  <img src="docs/static/images/wavtts_pipeline.png" alt="WavTTS pipeline" width="85%">
-</div>
+- `clean` — single, speaker-consistent speech
+- `mixed` — speaker-inconsistent speech (training-time augmentation)
+- `null` — unconditional
 
-**Note:** This repository is based on [F5-TTS](https://github.com/SWivid/F5-TTS). For general usage, troubleshooting, and basic guidance, please refer to the original F5-TTS repository. The sections below outline workflows specific to WavTTS.
+**No-leaky mixing augmentation.** During training, a sample becomes `mixed` (prob `p_mix`) by combining it with a batch-roll partner in one of two equal-power forms:
 
-## 🚀 News
+- **overlap** — whole-utterance blend `√(1−λ)·x + √λ·partner` (simultaneous speakers)
+- **concat** — switch to the partner at a random point with an equal-power cos/sin crossfade (temporal speaker switch)
 
-- **[2026-06-03]**: We have released the WavTTS codebase along with the official 16 kHz checkpoint. Please note that this project is still under active development, and we will continue to roll out updates and improvements.
+Content and label always agree over the whole utterance, and crossfading leaves no boundary artifact the model could cheat on — hence "no-leaky".
 
+**Negative-sample CFG.** At inference, guidance extrapolates away from the speaker-inconsistent direction:
 
+```
+v = v_clean + w · (v_clean − v_mixed)
+```
+
+pushing generation toward single-speaker, speaker-consistent speech. `--negative null` gives conventional CFG as a baseline.
+
+Design documents live under [`docs/superpowers/specs/`](docs/superpowers/specs/) with the full rationale, defaults, and known limitations.
+
+**Note:** the upstream TTS inference/eval scripts (`infer_cli.py`, `utils_infer.py`, `src/wavtts/eval/`) are kept for reference but are incompatible with this model and no longer maintained here.
 
 ## ⚙️ Installation
 
-We recommend using Conda to manage the environment and dependencies.
-
 ```bash
-# 1. Clone the repository
-git clone https://github.com/cwx-worst-one/WavTTS
+git clone https://github.com/toonnyy8/WavTTS
 cd WavTTS
 
-# 2. Create and activate a virtual environment
 conda create -n wavtts python=3.10
 conda activate wavtts
 
-# 3. Install PyTorch (>=2.2.0) with CUDA support, e.g.,
+# PyTorch (>=2.2.0) with CUDA support, e.g.
 pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 
-# 4. Install WavTTS in editable mode
-pip install -e .
+# editable install ([dev] adds pytest)
+pip install -e ".[dev]"
 ```
-
-## 📦 Model Checkpoints
-
-The official WavTTS checkpoint is available on Hugging Face: [WavTTS 🤗](https://huggingface.co/worstchan/WavTTS). The default checkpoint supports 16 kHz zero-shot TTS inference and will be downloaded automatically the first time you run the inference script.
-
-## 🚀 Inference
-
-WavTTS supports both command-line inference and script-based inference. For more details, please refer to the [Inference Guide](src/wavtts/infer/README.md).
-
-### CLI Inference
-
-Generate speech using a short reference audio prompt. CLI arguments will automatically override values defined in the TOML config.
-
-```bash
-wavtts_infer-cli \
-  --model WavTTS \
-  --ref_audio "provide_prompt_wav_path_here.wav" \
-  --ref_text "The content, subtitle, or transcription of the reference audio." \
-  --gen_text "The text you want WavTTS to synthesize."
-```
-
-Alternatively, manage your parameters cleanly using a TOML configuration file:
-
-```bash
-# Use the provided default config
-wavtts_infer-cli -c src/wavtts/infer/examples/basic.toml
-
-# Use a custom config (with an inline text override)
-wavtts_infer-cli -c custom.toml --gen_text "Override text here."
-```
-
-### Script-based Inference
-
-For customized pipelines, you can directly modify the paths and texts in `src/wavtts/infer/infer.sh` and execute:
-
-```bash
-bash src/wavtts/infer/infer.sh
-```
-
 
 ## 🏋️ Training
 
-Training WavTTS requires preprocessed dataset metadata. For a complete walkthrough of data preparation, training, and fine-tuning, please refer to the [Training Guide](src/wavtts/train/README.md).
-
-### Data Preparation
-
-We use [Emilia](https://huggingface.co/datasets/amphion/Emilia-Dataset) as the training dataset in our main experiments. After downloading Emilia, update the paths in the preparation script and run:
+Prepare a raw-waveform dataset (e.g., [Emilia](https://huggingface.co/datasets/amphion/Emilia-Dataset)) with the scripts under `src/wavtts/train/datasets/`, then:
 
 ```bash
-# Prepare training metadata for the Emilia dataset
-python src/wavtts/train/datasets/prepare_emilia.py
-```
-
-Preparation scripts for other datasets like LibriTTS are available under `src/wavtts/train/datasets/`. To use a custom dataset, please adapt the loading logic in `src/wavtts/model/dataset.py`.
-
-### Launching Training
-
-WavTTS can be trained directly with `accelerate`:
-
-```bash
-# Step 1: Configure Accelerate (e.g., multi-GPU DDP, mixed precision)
 accelerate config
-
-# Step 2: Launch training using a Hydra config
-# YAML configuration files are located under the src/wavtts/configs/ directory.
 accelerate launch src/wavtts/train/train.py --config-name WavTTS.yaml
-
-# Example with inline overrides:
-accelerate launch --mixed_precision=bf16 src/wavtts/train/train.py --config-name WavTTS.yaml ++datasets.batch_size_per_gpu=19200
 ```
 
-For our main experiments, we provide a unified launcher script. Remember to edit the default environment variables at the top of the script before running:
+Key config entries in `src/wavtts/configs/WavTTS.yaml`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `seed` | 666 | run-level reproducibility (python/torch/cuda + dataset shuffling, cudnn deterministic) |
+| `model.cfm.p_mix` | 0.5 | prob a sample becomes a `mixed` negative |
+| `model.cfm.p_concat` | 0.5 | among mixed: concat (temporal switch) vs overlap |
+| `model.cfm.state_drop_prob` | 0.1 | drop state label to `null` |
+| `ckpts.logger` | tensorboard | `wandb` \| `tensorboard` \| `null` |
+| `ckpts.log_samples_seeds` | [0, 1, 2, 3] | fixed seeds for checkpoint sampling — same clips evolve across training |
+| `ckpts.spk_ckpt_path` | null | ECAPA (WavLM-large) ckpt enabling `gen/spk_sim_self` |
+
+### Monitoring
 
 ```bash
-bash src/wavtts/train/run_main_train.sh
+tensorboard --logdir runs
 ```
 
+At every checkpoint the trainer generates fixed-seed clips and logs audio (`gen/audio_seed{k}`), log-mel images (`gen/mel_seed{k}`), and quality metrics:
 
-## 📊 Evaluation
+- `gen/utmos` — predicted MOS (1–5), naturalness at a glance
+- `gen/spk_sim_self` — cosine similarity of the clip's two halves' speaker embeddings — the direct speaker-consistency signal this design targets (opt-in via `ckpts.spk_ckpt_path`)
+- `gen/silence_ratio`, `gen/clipping_rate`, `gen/rms` — instant alarms for silent collapse, clipping, and energy drift
 
-For evaluation setup, dataset preparation, and objective metric scripts, please refer to the [Evaluation Guide](src/wavtts/eval/README.md).
+All metrics are fail-safe: they skip (with a warning) rather than interrupt training.
 
+## 🎧 Sampling
+
+```bash
+python src/wavtts/infer/sample_uncond.py \
+  --ckpt ckpts/.../model_last.pt \
+  --duration_sec 5 --num 4 \
+  --steps 32 --cfg_strength 2.0 \
+  --negative mixed \
+  --solver euler        # euler | dpmpp (DPM-Solver++(2M))
+```
+
+Useful flags: `--negative null` (conventional CFG baseline), `--solver dpmpp` (multistep DPM-Solver++ adapted to the rectified-flow interpolant), `--seed N` (deterministic, does not touch the global RNG), `--device cpu`.
+
+## ✅ Tests
+
+```bash
+python -m pytest tests/test_uncond_smoke.py -v
+```
+
+CPU-only smoke suite covering the mixing math (including the no-leak prefix property), CFG paths, both solvers, seed isolation, metrics, and the CLI end-to-end.
 
 ## 🙏 Acknowledgements
 
-WavTTS is built upon the awesome [F5-TTS](https://github.com/SWivid/F5-TTS) codebase, with references to the implementations of [DAC](https://github.com/descriptinc/descript-audio-codec) and [JiT](https://github.com/LTH14/JiT). We sincerely thank the authors for their invaluable open-source contributions.
-
-If you encounter general pipeline or environment issues, we recommend first checking the [F5-TTS issue tracker](https://github.com/SWivid/F5-TTS/issues), where many common questions may have already been discussed or resolved.
-
-## 📝 Citation
-
-If you find this work useful in your research, please consider citing our paper:
+This fork is built on [WavTTS](https://github.com/cwx-worst-one/WavTTS) (Chen et al., 2026), which itself builds on [F5-TTS](https://github.com/SWivid/F5-TTS), [DAC](https://github.com/descriptinc/descript-audio-codec), and [JiT](https://github.com/LTH14/JiT). If you use the waveform-domain flow-matching backbone, please cite the original paper:
 
 ```bibtex
 @article{chen2026wavtts,
@@ -156,4 +122,4 @@ If you find this work useful in your research, please consider citing our paper:
 
 ## 📜 License
 
-The codebase of this repository is released under the MIT License. Due to the license restrictions of the Emilia training dataset, the released pre-trained model weights are licensed under CC BY-NC 4.0.
+Code is released under the MIT License (inherited from upstream). Upstream pre-trained weights are CC BY-NC 4.0 due to Emilia dataset licensing.
