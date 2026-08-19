@@ -18,12 +18,14 @@ class CustomDataset(Dataset):
         durations=None,
         target_sample_rate=16_000,
         wav_frame_len: int = 160,
+        target_rms: float = 0.1,  # per-utterance loudness normalization; 0 disables
         **_,
     ):
         self.data = custom_dataset
         self.durations = durations
         self.target_sample_rate = target_sample_rate
         self.wav_frame_len = wav_frame_len
+        self.target_rms = target_rms
 
         self._resamplers = {}
 
@@ -62,6 +64,16 @@ class CustomDataset(Dataset):
                     source_sample_rate, self.target_sample_rate
                 )
             audio = self._resamplers[source_sample_rate](audio)
+
+        # loudness: every utterance enters training at the same RMS, so the equal-power
+        # mixing augmentation blends two comparable sources instead of one drowning the other
+        if self.target_rms > 0:
+            rms = audio.pow(2).mean().sqrt()
+            if rms > 1e-5:
+                audio = audio * (self.target_rms / rms)
+            peak = audio.abs().max()
+            if peak > 0.99:  # ponytail: rescale, not clip — keeps the waveform shape
+                audio = audio * (0.99 / peak)
 
         return {
             "wav": audio.squeeze(0),
