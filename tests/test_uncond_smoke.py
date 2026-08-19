@@ -171,3 +171,27 @@ def test_collate_wav_only():
     assert out["wav"].shape == (2, 1000)
     assert out["wav_lengths"].tolist() == [1000, 800]
     assert torch.equal(out["wav"][1, 800:], torch.zeros(200))
+
+
+def test_config_instantiates_model_and_trains_one_step():
+    from importlib.resources import files as pkg_files
+
+    from hydra.utils import get_class
+    from omegaconf import OmegaConf
+
+    from wavtts.model import CFM
+
+    cfg = OmegaConf.load(str(pkg_files("wavtts").joinpath("configs/WavTTS.yaml")))
+    arch = OmegaConf.to_container(cfg.model.arch, resolve=True)
+    arch.update(dim=64, depth=2, heads=2)  # 縮小以便 CPU 測試；參數名必須與 DiT 簽名一致
+    cfm_kwargs = OmegaConf.to_container(cfg.model.cfm, resolve=True)
+    model_cls = get_class(f"wavtts.model.{cfg.model.backbone}")
+    model = CFM(
+        transformer=model_cls(**arch, wav_frame_len=cfg.model.waveform.wav_frame_len),
+        waveform_kwargs=OmegaConf.to_container(cfg.model.waveform, resolve=True),
+        **cfm_kwargs,
+    )
+    torch.manual_seed(0)
+    loss, loss_dict = model(torch.randn(2, 16000) * 0.1)
+    assert torch.isfinite(loss)
+    loss.backward()

@@ -78,8 +78,6 @@ class Trainer:
         max_samples=32,
         grad_accumulation_steps=1,
         max_grad_norm=1.0,
-        noise_scheduler: str | None = None,
-        duration_predictor: torch.nn.Module | None = None,
         logger: str | None = "wandb",  # "wandb" | "tensorboard" | None
         wandb_project="test_wavtts",
         wandb_run_name="test_run",
@@ -121,7 +119,6 @@ class Trainer:
                     "max_samples": max_samples,
                     "grad_accumulation_steps": grad_accumulation_steps,
                     "max_grad_norm": max_grad_norm,
-                    "noise_scheduler": noise_scheduler,
                 }
             model_cfg_dict["gpus"] = self.accelerator.num_processes
             self.accelerator.init_trackers(
@@ -160,10 +157,6 @@ class Trainer:
         self.max_samples = max_samples
         self.grad_accumulation_steps = grad_accumulation_steps
         self.max_grad_norm = max_grad_norm
-
-        self.noise_scheduler = noise_scheduler
-
-        self.duration_predictor = duration_predictor
 
         if bnb_optimizer:
             import bitsandbytes as bnb
@@ -295,8 +288,6 @@ class Trainer:
 
     def train(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
         if self.log_samples:
-            from wavtts.infer.utils_infer import cfg_strength, nfe_step, sway_sampling_coef
-
             target_sample_rate = train_dataset.target_sample_rate
             log_samples_path = f"{self.checkpoint_path}/samples"
             os.makedirs(log_samples_path, exist_ok=True)
@@ -390,19 +381,10 @@ class Trainer:
 
             for batch in current_dataloader:
                 with self.accelerator.accumulate(self.model):
-                    text_inputs = batch["text"]
                     wav = batch["wav"]
                     wav_lengths = batch["wav_lengths"]
-                    text_lengths = batch["text_lengths"]
 
-                    # TODO. add duration predictor training
-                    if self.duration_predictor is not None and self.accelerator.is_local_main_process:
-                        dur_loss = self.duration_predictor(wav, lens=batch.get("durations"))
-                        self.accelerator.log({"duration loss": dur_loss.item()}, step=global_update)
-
-                    loss, cond, pred, loss_dict = self.model(
-                        wav, text=text_inputs, lens=wav_lengths, noise_scheduler=self.noise_scheduler,
-                    )
+                    loss, loss_dict = self.model(wav, lens=wav_lengths)
                     self.accelerator.backward(loss)
 
                     if self.max_grad_norm > 0 and self.accelerator.sync_gradients:
@@ -451,34 +433,19 @@ class Trainer:
 
                     if self.log_samples and self.accelerator.is_local_main_process:
                         unwrap = self.accelerator.unwrap_model(self.model)
-                        
-                        infer_text = [
-                            text_inputs[0] + ([" "] if isinstance(text_inputs[0], list) else " ") + text_inputs[0]
-                        ]
-                        
+
                         with torch.inference_mode():
-                            ref_wav_len = wav_lengths[0].item()
-                            ref_wav = wav[0][:ref_wav_len].unsqueeze(0).to(self.accelerator.device)  # [1, N]
-
+                            gen_len = min(wav_lengths[0].item(), 10 * target_sample_rate)
                             generated, _ = unwrap.sample(
-                                cond=ref_wav,                   # [1, N]
-                                text=infer_text,
-                                duration=ref_wav_len * 2,
-                                steps=nfe_step,
-                                cfg_strength=cfg_strength,
-                                sway_sampling_coef=sway_sampling_coef,
+                                duration=gen_len,
+                                steps=32,
+                                cfg_strength=2.0,
+                                sway_sampling_coef=-1.0,
                             )
-                            generated = generated.to(torch.float32).cpu()  # [1, N_total]
-
-                            cut = ref_wav_len
-                            gen_audio = generated[:, cut:]  # [1, N_gen]
-                            ref_audio = ref_wav.cpu()       # [1, N_ref]
+                            gen_audio = generated.to(torch.float32).cpu()  # [1, N_gen]
 
                         torchaudio.save(
                             f"{log_samples_path}/update_{global_update}_gen.wav", gen_audio, target_sample_rate
-                        )
-                        torchaudio.save(
-                            f"{log_samples_path}/update_{global_update}_ref.wav", ref_audio, target_sample_rate
                         )
                         self.model.train()
 

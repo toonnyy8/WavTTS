@@ -8,7 +8,6 @@ from omegaconf import OmegaConf
 
 from wavtts.model import CFM, Trainer
 from wavtts.model.dataset import load_dataset
-from wavtts.model.utils import get_tokenizer
 
 
 os.chdir(str(files("wavtts").joinpath("../..")))  # change working directory to root of project (local editable)
@@ -18,27 +17,18 @@ os.chdir(str(files("wavtts").joinpath("../..")))  # change working directory to 
 def main(model_cfg):
     model_cls = hydra.utils.get_class(f"wavtts.model.{model_cfg.model.backbone}")
     model_arc = model_cfg.model.arch
-    tokenizer = model_cfg.model.tokenizer
     cfm_kwargs = getattr(model_cfg.model, "cfm", {}) or {}
 
     exp_name = model_cfg.ckpts.exp_name
     wandb_resume_id = None
 
-    # set text tokenizer
-    if tokenizer != "custom":
-        tokenizer_path = model_cfg.datasets.name
-    else:
-        tokenizer_path = model_cfg.model.tokenizer_path
-    vocab_char_map, vocab_size = get_tokenizer(tokenizer_path, tokenizer)
-
     # set model
     model = CFM(
-        transformer=model_cls(**model_arc, text_num_embeds=vocab_size, wav_frame_len=model_cfg.model.waveform.wav_frame_len),
+        transformer=model_cls(**model_arc, wav_frame_len=model_cfg.model.waveform.wav_frame_len),
         waveform_kwargs=model_cfg.model.waveform,
-        vocab_char_map=vocab_char_map,
         **cfm_kwargs,
     )
-    
+
     save_dir = model_cfg.ckpts.save_dir
     if os.path.isabs(save_dir):
         checkpoint_path = save_dir
@@ -69,7 +59,7 @@ def main(model_cfg):
         model_cfg_dict=OmegaConf.to_container(model_cfg, resolve=True),
     )
 
-    train_dataset = load_dataset(model_cfg.datasets.name, tokenizer, waveform_kwargs=model_cfg.model.waveform)
+    train_dataset = load_dataset(model_cfg.datasets.name, waveform_kwargs=model_cfg.model.waveform)
     trainer.train(
         train_dataset,
         num_workers=model_cfg.datasets.num_workers,
