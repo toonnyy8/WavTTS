@@ -10,8 +10,10 @@
 - 移除 text conditioning 與 audio prompt（infilling）conditioning。
 - 模型唯一的條件輸入是一個三值狀態標記：`clean=0`（單一語者乾淨語音）、
   `mixed=1`（兩位語者混合語音）、`null=2`（無條件）。
-- 訓練時以 **no-leaky 混合增強**產生 mixed 樣本：整段波形（而非只有某區段）
-  以等功率比例混入 batch 內另一條語音，標記與內容完全一致，不洩漏乾淨答案。
+- 訓練時以 **no-leaky 混合增強**產生 mixed 樣本，兩種型態各半：
+  (a) **overlap**——整段波形等功率比例混入 batch 內另一條語音（多人疊音）；
+  (b) **concat**——前後段由不同語者串接、切換處等功率 crossfade（時間軸換人）。
+  標記與內容完全一致，且不留下可作弊的邊界 artifact，不洩漏乾淨答案。
 - 推論時以 CFG 做**負樣本引導**：正分支 `clean`、負分支 `mixed`（預設）或 `null`，
   `v = v_clean + w · (v_clean − v_neg)`，把生成推離「多語者混雜」方向，
   得到語者一致的單人語音。
@@ -51,24 +53,37 @@
 | 參數 | 預設 | 意義 |
 |---|---|---|
 | `p_mix` | 0.5 | 每個樣本被做成 mixed 的機率 |
-| `mix_lambda_range` | (0.3, 0.7) | 混合能量比 λ 的均勻取樣範圍 |
+| `p_concat` | 0.5 | mixed 樣本中採 concat 型態的比例（其餘為 overlap） |
+| `mix_lambda_range` | (0.3, 0.7) | overlap 混合能量比 λ 的均勻取樣範圍 |
+| `concat_point_range` | (0.3, 0.7) | concat 切換點位置（佔有效長度比例）的均勻取樣範圍 |
+| `concat_xfade_ms` | 20 | concat 切換處等功率 crossfade 長度（毫秒） |
 | `state_drop_prob` | 0.1 | 標記被 drop 成 `null` 的機率（保留純無條件採樣能力） |
 
 #### 訓練 `forward(inp, lens=None)`
 
-1. 對每個樣本抽 Bernoulli(`p_mix`) 決定是否混合。
-2. 混合來源為 `partner = inp.roll(1, dims=0)`（batch-roll，零 IO 成本）；
-   λ ~ U(`mix_lambda_range`)，等功率混合
-   `x1 = sqrt(1−λ)·inp + sqrt(λ)·partner`。
+1. 對每個樣本抽 Bernoulli(`p_mix`) 決定是否混合；混合來源一律為
+   `partner = inp.roll(1, dims=0)`（batch-roll，零 IO 成本）。
+2. 混合樣本再抽 Bernoulli(`p_concat`) 決定型態：
+   - **overlap**：λ ~ U(`mix_lambda_range`)，等功率混合
+     `x1 = sqrt(1−λ)·inp + sqrt(λ)·partner`（多人疊音負樣本）。
+   - **concat**：切換點 `s = u·len`，u ~ U(`concat_point_range`)；
+     `x1[:s] = inp[:s]`、`x1[s:] = partner[s:]`，切換處以 `concat_xfade_ms`
+     的等功率（cos/sin）crossfade 銜接（時間軸換人負樣本）。
+     Crossfade 是 no-leaky 的必要條件：硬接的 click artifact 會讓模型
+     以邊界瑕疵而非語者身分辨識 mixed，CFG 引導就會失效。
+   兩種型態共用同一個 `mixed` 標記——負方向是「語者不一致」的統稱，
+   不分 class、不增加推論期旋鈕。
+   `# ponytail: 1 switch point per concat sample; go 1-2 random switches if
+   the model only learns late-utterance consistency.`
 3. 標記：混合樣本 `mixed`，其餘 `clean`；再以 `state_drop_prob` 逐樣本改為 `null`。
 4. Flow matching 與現況相同（`prediction=x_pred`、`loss_space=v`、
    logistic-normal t 取樣、`latents_scale`），但 loss 遮罩改為整段有效長度
    （`lens_to_mask(lens)`），不再有 infilling span。
 5. Aux mel loss 照舊，`frame_mask` 傳長度遮罩、`frame_lengths=lens`。
 
-已知限制（接受）：partner 比本樣本短時，其 padding 零值區混不到干擾語音，
-mixed 標記在該區段偏「乾淨」；dynamic batch sampler 依長度排序，同 batch 長度相近，
-影響有限。`# ponytail: batch-roll mixing; switch to dataset-level pair loading if
+已知限制（接受）：partner 比本樣本短時，overlap 的 padding 零值區混不到干擾語音、
+concat 的後段可能含 partner 的尾端靜音，mixed 標記在該區段偏「乾淨」；
+dynamic batch sampler 依長度排序，同 batch 長度相近，影響有限。`# ponytail: batch-roll mixing; switch to dataset-level pair loading if
 label purity ever matters.`
 
 #### 推論 `sample(...)`
@@ -112,7 +127,8 @@ sample(duration, *, batch=1, steps=32, cfg_strength=2.0,
 
 - 刪除 `tokenizer`、`tokenizer_path`、arch 的 `text_dim`/`text_mask_padding`/
   `conv_layers`（text conv）欄位。
-- `cfm` 新增 `p_mix: 0.5`、`mix_lambda_range: [0.3, 0.7]`、`state_drop_prob: 0.1`；
+- `cfm` 新增 `p_mix: 0.5`、`p_concat: 0.5`、`mix_lambda_range: [0.3, 0.7]`、
+  `concat_point_range: [0.3, 0.7]`、`concat_xfade_ms: 20`、`state_drop_prob: 0.1`；
   刪除 `joint_cond_drop_prob`。
 - 其餘超參不變。
 
@@ -138,5 +154,7 @@ sample(duration, *, batch=1, steps=32, cfg_strength=2.0,
   「單語者純度」梯度。若實驗顯示引導過強造成 artifacts，可下調 `cfg_strength`
   或改 `negative="null"` 做傳統 CFG 對照。
 - `p_mix=0.5` 給負分支足夠的訓練訊號；若 clean 品質受影響可降至 0.3。
+  overlap 與 concat 各教一件事（不疊音／不換人），`p_concat` 可依實驗調整比重；
+  concat 型態與語者漂移失效模式最直接對應。
 - 混合用等功率係數（`sqrt(1−λ)`, `sqrt(λ)`）避免破音；不做響度對齊
   （Emilia 已大致正規化）。
