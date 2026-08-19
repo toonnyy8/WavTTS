@@ -2,7 +2,6 @@
 ein notation:
 b - batch
 n - sequence
-nt - text sequence
 nw - raw wave length
 d - dimension
 """
@@ -10,24 +9,16 @@ d - dimension
 
 from __future__ import annotations
 
-from random import random
 import math
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.nn.utils.rnn import pad_sequence
 from torchdiffeq import odeint
 
+from wavtts.model.backbones.dit import STATE_CLEAN, STATE_MIXED, STATE_NULL
 from wavtts.model.modules import MelSpectrogramLoss
-from wavtts.model.utils import (
-    exists,
-    get_epss_timesteps,
-    lens_to_mask,
-    list_str_to_idx,
-    list_str_to_tensor,
-    mask_from_frac_lengths,
-)
+from wavtts.model.utils import exists, get_epss_timesteps, lens_to_mask
 
 
 class CFM(nn.Module):
@@ -36,19 +27,18 @@ class CFM(nn.Module):
         transformer: nn.Module,
         sigma=0.0,
         odeint_kwargs: dict = dict(
-            # atol = 1e-5,
-            # rtol = 1e-5,
             method="euler"  # 'midpoint'
         ),
-        audio_drop_prob=0.3,
-        cond_drop_prob=0.2,
-        joint_cond_drop_prob=0.0,
+        p_mix: float = 0.5,
+        p_concat: float = 0.5,
+        mix_lambda_range: tuple[float, float] = (0.3, 0.7),
+        concat_point_range: tuple[float, float] = (0.3, 0.7),
+        concat_xfade_ms: float = 20.0,
+        state_drop_prob: float = 0.1,
         waveform_kwargs: dict = dict(),
-        frac_lengths_mask: tuple[float, float] = (0.7, 1.0),
-        vocab_char_map: dict[str:int] | None = None,
-        prediction: str = "flow",       # "flow" | "x_pred"
-        loss_space: str = "flow",       # "flow" | "v" | "x"
-        t_sampling: str = "uniform",    # "uniform" | "logistic_normal"
+        prediction: str = "flow",  # "flow" | "x_pred"
+        loss_space: str = "flow",  # "flow" | "v" | "x"
+        t_sampling: str = "uniform",  # "uniform" | "logistic_normal"
         P_mean: float = 0.0,
         P_std: float = 1.0,
         time_shift: float = 1.0,
@@ -61,17 +51,18 @@ class CFM(nn.Module):
     ):
         super().__init__()
 
-        self.frac_lengths_mask = frac_lengths_mask
-        
         # waveform geometry
         waveform_kwargs = dict(waveform_kwargs)
         self.wav_frame_len = int(waveform_kwargs.pop("wav_frame_len", 160))
         self.num_channels = self.wav_frame_len
 
-        # classifier-free guidance
-        self.audio_drop_prob = audio_drop_prob
-        self.cond_drop_prob = cond_drop_prob
-        self.joint_cond_drop_prob = joint_cond_drop_prob
+        # no-leaky mixing augmentation / state conditioning
+        self.p_mix = p_mix
+        self.p_concat = p_concat
+        self.mix_lambda_range = tuple(mix_lambda_range)
+        self.concat_point_range = tuple(concat_point_range)
+        self.concat_xfade_ms = concat_xfade_ms
+        self.state_drop_prob = state_drop_prob
 
         # transformer
         self.transformer = transformer
@@ -85,9 +76,6 @@ class CFM(nn.Module):
 
         # sampling related
         self.odeint_kwargs = odeint_kwargs
-
-        # vocab map for tokenization
-        self.vocab_char_map = vocab_char_map
 
         # enhanced flow model settings
         self.prediction = prediction
@@ -116,25 +104,10 @@ class CFM(nn.Module):
         else:
             self.aux_mel_loss = None
 
-        self.mask_align_to = 1
-        alignments = []
-        if self.aux_mel_loss is not None and hasattr(self.aux_mel_loss, "mel_transforms"):
-            hop_lengths = [int(m.hop_length) for m in self.aux_mel_loss.mel_transforms]
-            if len(hop_lengths) > 0:
-                lcm_hop = hop_lengths[0]
-                for h in hop_lengths[1:]:
-                    lcm_hop = math.lcm(lcm_hop, h)
-                alignments.append(lcm_hop)
-        if len(alignments) > 0:
-            lcm_align = alignments[0]
-            for a in alignments[1:]:
-                lcm_align = math.lcm(lcm_align, a)
-            self.mask_align_to = max(1, lcm_align)
-            
     @property
     def device(self):
         return next(self.parameters()).device
-    
+
     def _sample_time(self, batch: int, dtype, device):
         if self.t_sampling == "uniform":
             t = torch.rand((batch,), dtype=dtype, device=device)
@@ -157,134 +130,108 @@ class CFM(nn.Module):
             denom = denom.unsqueeze(-1)
         return (x_pred - z) / denom
 
+    def _mix_augment(self, x1: float["b nw"], lens: int["b"]):
+        """No-leaky mixing augmentation: content and state label always agree
+        over the whole utterance, and boundaries carry no tell-tale artifacts.
+
+        overlap: equal-power blend with a batch-roll partner (simultaneous speakers)
+        concat:  equal-power crossfade into the partner at a random switch point
+                 (temporal speaker switch)
+        """
+        batch, seq_len = x1.shape
+        device = x1.device
+        state = torch.full((batch,), STATE_CLEAN, device=device, dtype=torch.long)
+        if batch < 2 or self.p_mix <= 0.0:
+            return x1, state  # roll partner would be the sample itself
+
+        partner = x1.roll(1, dims=0)
+        mix_flags = torch.rand(batch, device=device) < self.p_mix
+        concat_flags = torch.rand(batch, device=device) < self.p_concat
+
+        # overlap: x = sqrt(1-lam)*x1 + sqrt(lam)*partner
+        lo, hi = self.mix_lambda_range
+        lam = torch.empty((batch, 1), device=device, dtype=x1.dtype).uniform_(lo, hi)
+        overlap = torch.sqrt(1.0 - lam) * x1 + torch.sqrt(lam) * partner
+
+        # concat: switch to partner at s with an equal-power crossfade
+        # (a hard cut's click would let the model detect "mixed" from the boundary
+        #  artifact instead of speaker identity, breaking the CFG direction)
+        xfade_len = max(1, int(self.concat_xfade_ms * self.target_sample_rate / 1000.0))
+        plo, phi = self.concat_point_range
+        u = torch.empty((batch,), device=device, dtype=x1.dtype).uniform_(plo, phi)
+        s = (u * lens.to(x1.dtype)).long().clamp(min=1, max=seq_len - 1)
+        idx = torch.arange(seq_len, device=device).unsqueeze(0)  # [1, n]
+        prog = ((idx - s.unsqueeze(-1)).to(x1.dtype) / xfade_len).clamp(0.0, 1.0)
+        g_in = torch.sin(prog * math.pi / 2)  # partner fades in
+        g_out = torch.cos(prog * math.pi / 2)  # original fades out; g_in^2 + g_out^2 = 1
+        concat = g_out * x1 + g_in * partner
+
+        mixed = torch.where(concat_flags.unsqueeze(-1), concat, overlap)
+        x1 = torch.where(mix_flags.unsqueeze(-1), mixed, x1)
+        state = torch.where(mix_flags, torch.full_like(state, STATE_MIXED), state)
+        # ponytail: batch-roll partner; padding tails dilute mixed labels slightly,
+        # switch to dataset-level pair loading if label purity ever matters.
+        return x1, state
+
     @torch.no_grad()
     def sample(
         self,
-        cond: float["b n d"] | float["b nw"],
-        text: int["b nt"] | list[str],
-        duration: int | int["b"],
+        duration: int,  # number of samples at target_sample_rate
         *,
-        lens: int["b"] | None = None,
-        steps=32,
-        cfg_strength=1.0,
-        sway_sampling_coef=None,
-        timestep_mapping="sway_sampling",
-        timestep_power=None,
-        shift=1.0,
+        batch: int = 1,
+        steps: int = 32,
+        cfg_strength: float = 2.0,
+        negative: str = "mixed",  # "mixed" | "null"
+        sway_sampling_coef: float | None = None,
+        timestep_mapping: str = "sway_sampling",
+        timestep_power: float | None = None,
+        shift: float = 1.0,
+        use_epss: bool = True,
         seed: int | None = None,
-        max_duration=4096,
-        use_epss=True,
-        no_ref_audio=False,
-        duplicate_test=False,
-        t_inter=0.1,
-        edit_mask=None,
     ):
         self.eval()
-        # raw wave
-        if cond.ndim != 2:
-            raise ValueError(f"WavTTS expects raw waveform conditioning [B, N], got {tuple(cond.shape)}")
+        device = self.device
+        dtype = next(self.parameters()).dtype
 
-        cond = cond.to(next(self.parameters()).dtype)
-        cond = cond * self.latents_scale
+        if negative == "mixed":
+            neg_id = STATE_MIXED
+        elif negative == "null":
+            neg_id = STATE_NULL
+        else:
+            raise ValueError(f"Unknown negative: {negative}")
+        state = torch.full((batch,), STATE_CLEAN, device=device, dtype=torch.long)
+        neg_state = torch.full((batch,), neg_id, device=device, dtype=torch.long)
 
-        batch, cond_seq_len, device = *cond.shape[:2], cond.device
-        if not exists(lens):
-            lens = torch.full((batch,), cond_seq_len, device=device, dtype=torch.long)
+        requested = int(duration)
+        aligned = int(math.ceil(requested / self.wav_frame_len) * self.wav_frame_len)
 
-        # text
-        if isinstance(text, list):
-            if exists(self.vocab_char_map):
-                text = list_str_to_idx(text, self.vocab_char_map).to(device)
-            else:
-                text = list_str_to_tensor(text).to(device)
-            assert text.shape[0] == batch
-
-        # duration
-        cond_mask = lens_to_mask(lens)
-        if edit_mask is not None:
-            cond_mask = cond_mask & edit_mask
-
-        if isinstance(duration, int):
-            duration = torch.full((batch,), duration, device=device, dtype=torch.long)
-
-        # keep legacy max_duration semantics for wav path: 4096 means 4096 frame-tokens.
-        max_duration_limit = max_duration * self.wav_frame_len
-        duration = torch.maximum(
-            torch.maximum((text != -1).sum(dim=-1), lens) + 1, duration
-        )  # duration at least text/audio prompt length plus one token, so something is generated
-        duration = duration.clamp(max=max_duration_limit)
-        max_duration = duration.amax()
-
-        # duplicate test corner for inner time step oberservation
-        if duplicate_test:
-            test_cond = F.pad(cond, (cond_seq_len, max_duration - 2 * cond_seq_len), value=0.0)
-
-        cond = F.pad(cond, (0, max_duration - cond_seq_len), value=0.0)
-        if no_ref_audio:
-            cond = torch.zeros_like(cond)
-
-        cond_mask = F.pad(cond_mask, (0, max_duration - cond_mask.shape[-1]), value=False)
-        step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
-
-        if batch > 1:
-            mask = lens_to_mask(duration, length=max_duration)
-        else:  # save memory and speed up, as single inference need no mask currently
-            mask = None
-
-        # neural ode
+        if exists(seed):
+            torch.manual_seed(seed)
+        y0 = torch.randn(batch, aligned, device=device, dtype=dtype)
 
         def fn(t, x):
-            # at each step, conditioning is fixed
-            # step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
-            def to_v(pred_x_or_v):
+            def to_v(pred):
                 if self.prediction == "flow":
-                    return pred_x_or_v
-                else:  # x_pred
-                    return self._x_to_v(pred_x_or_v, x, t)
+                    return pred
+                return self._x_to_v(pred, x, t)
 
-            # predict flow (cond)
             if cfg_strength < 1e-5:
-                pred, *_ = self.transformer(
-                    x=x, cond=step_cond, text=text, time=t, mask=mask,
-                    drop_audio_cond=False, drop_text=False, cache=True,
-                )
+                pred = self.transformer(x=x, state=state, time=t)
                 return to_v(pred)
 
-            # predict flow (cond and uncond), for classifier-free guidance
-            pred_cfg, *_ = self.transformer(
-                x=x, cond=step_cond, text=text, time=t, mask=mask,
-                cfg_infer=True, cache=True,
-            )
-            pred, null_pred = torch.chunk(pred_cfg, 2, dim=0)
-            v_cond = to_v(pred)
-            v_uncond = to_v(null_pred)
-
-            return v_cond + (v_cond - v_uncond) * cfg_strength
-
-        # noise input
-        # to make sure batch inference result is same with different batch size, and for sure single inference
-        # still some difference maybe due to convolutional layers
-        y0 = []
-        for dur in duration:
-            if exists(seed):
-                torch.manual_seed(seed)
-            y0.append(torch.randn(dur, device=self.device, dtype=step_cond.dtype))
-        y0 = pad_sequence(y0, padding_value=0, batch_first=True)
-
-        t_start = 0
-
-        # duplicate test corner for inner time step oberservation
-        if duplicate_test:
-            t_start = t_inter
-            y0 = (1 - t_start) * y0 + t_start * test_cond
-            steps = int(steps * (1 - t_start))
+            # negative-sample classifier-free guidance:
+            # push away from the speaker-inconsistent ("mixed") direction
+            pred_cfg = self.transformer(x=x, state=state, time=t, cfg_infer=True, neg_state=neg_state)
+            pred, neg_pred = torch.chunk(pred_cfg, 2, dim=0)
+            v_pos = to_v(pred)
+            v_neg = to_v(neg_pred)
+            return v_pos + (v_pos - v_neg) * cfg_strength
 
         use_epss = use_epss and timestep_mapping == "sway_sampling"
-
-        if t_start == 0 and use_epss:  # use Empirically Pruned Step Sampling for low NFE
-            t = get_epss_timesteps(steps, device=self.device, dtype=torch.float32)
+        if use_epss:  # use Empirically Pruned Step Sampling for low NFE
+            t = get_epss_timesteps(steps, device=device, dtype=torch.float32)
         else:
-            t = torch.linspace(t_start, 1, steps + 1, device=self.device, dtype=torch.float32)
+            t = torch.linspace(0, 1, steps + 1, device=device, dtype=torch.float32)
 
         if timestep_mapping == "uniform":
             pass
@@ -298,75 +245,39 @@ class CFM(nn.Module):
         else:
             raise ValueError(f"Unknown timestep_mapping: {timestep_mapping}")
 
-        effective_shift = shift
-        if effective_shift != 1.0:
-            t = t / (t + effective_shift * (1 - t))
+        if shift != 1.0:
+            t = t / (t + shift * (1 - t))
 
         # WavTTS inference uses Euler ODE sampling.
         odeint_kwargs = dict(self.odeint_kwargs)
         odeint_kwargs["method"] = "euler"
         trajectory = odeint(fn, y0, t, **odeint_kwargs)
-        self.transformer.clear_cache()
 
-        sampled = trajectory[-1]
-        out = sampled
-
-        out = out / self.latents_scale
-        cond_unscaled = cond / self.latents_scale
-        out = torch.where(cond_mask, cond_unscaled, out)
-
-        # ---- wav-only: trim to generated waveform duration ----
-        wav_list = []
-        for b in range(batch):
-            wav_list.append(out[b, : duration[b].item()])
-        out = pad_sequence(wav_list, batch_first=True, padding_value=0.0)  # [B, N]
-
-        return out, trajectory
+        out = trajectory[-1] / self.latents_scale
+        return out[:, :requested], trajectory
 
     def forward(
         self,
         inp: float["b nw"],  # raw waveform
-        text: int["b nt"] | list[str],
         *,
         lens: int["b"] | None = None,
-        noise_scheduler: str | None = None,
     ):
         # handle raw waveform
         if inp.ndim != 2:
             raise ValueError(f"WavTTS expects raw waveform input [B, N], got {tuple(inp.shape)}")
 
-        batch, seq_len, dtype, device, _σ1 = *inp.shape[:2], inp.dtype, self.device, self.sigma
-
-        # handle text as string
-        if isinstance(text, list):
-            if exists(self.vocab_char_map):
-                text = list_str_to_idx(text, self.vocab_char_map).to(device)
-            else:
-                text = list_str_to_tensor(text).to(device)
-            assert text.shape[0] == batch
+        batch, seq_len, dtype, device = *inp.shape[:2], inp.dtype, self.device
 
         # lens and mask
         if not exists(lens):  # if lens not acquired by trainer from collate_fn
-            lens = torch.full((batch,), seq_len, device=device)
+            lens = torch.full((batch,), seq_len, device=device, dtype=torch.long)
         mask = lens_to_mask(lens, length=seq_len)
 
-        # get a random span to mask out for training conditionally
-        frac_lengths = torch.zeros((batch,), device=self.device).float().uniform_(*self.frac_lengths_mask)
-        if self.mask_align_to > 1:
-            rand_span_mask = MelSpectrogramLoss._aligned_random_span_mask(
-                lengths=lens,
-                frac_lengths=frac_lengths,
-                align_to=self.mask_align_to,
-                max_length=seq_len,
-            )
-        else:
-            rand_span_mask = mask_from_frac_lengths(lens, frac_lengths)
-
-        if exists(mask):
-            rand_span_mask &= mask
-
-        # x1 is raw waveform
-        x1 = inp
+        # no-leaky mixing augmentation + per-sample state labels
+        x1, state = self._mix_augment(inp, lens)
+        if self.state_drop_prob > 0.0:
+            drop = torch.rand(batch, device=device) < self.state_drop_prob
+            state = torch.where(drop, torch.full_like(state, STATE_NULL), state)
 
         x1 = x1 * self.latents_scale
 
@@ -374,35 +285,14 @@ class CFM(nn.Module):
         x0 = torch.randn_like(x1)
 
         # time step
-        time = self._sample_time(batch, dtype=dtype, device=self.device)
+        time = self._sample_time(batch, dtype=dtype, device=device)
 
-        # sample xt (φ_t(x) in the paper)
+        # sample xt (phi_t(x) in the paper)
         t = time.unsqueeze(-1)
         φ = (1 - t) * x0 + t * x1
         flow = x1 - x0
 
-        # only predict what is within the random mask span for infilling
-        cond = torch.where(rand_span_mask, torch.zeros_like(x1), x1)
-
-        # transformer and cfg training with a drop rate
-        if self.joint_cond_drop_prob > 0.0:
-            joint_drop = random() < self.joint_cond_drop_prob
-            drop_audio_cond = joint_drop
-            drop_text = joint_drop
-        else:
-            drop_audio_cond = random() < self.audio_drop_prob  # p_drop in voicebox paper
-            if random() < self.cond_drop_prob:  # p_uncond in voicebox paper
-                drop_audio_cond = True
-                drop_text = True
-            else:
-                drop_text = False
-
-        # apply mask will use more memory; might adjust batchsize or batchsampler long sequence threshold
-        raw_pred, *_ = self.transformer(
-            x=φ, cond=cond, text=text, time=time,
-            drop_audio_cond=drop_audio_cond, drop_text=drop_text, mask=mask,
-            lens=lens,
-        )
+        raw_pred = self.transformer(x=φ, state=state, time=time, mask=mask, lens=lens)
 
         # interpret prediction
         if self.prediction == "flow":
@@ -429,7 +319,7 @@ class CFM(nn.Module):
         else:
             raise ValueError(f"Unknown loss_space: {self.loss_space}")
 
-        loss = loss[rand_span_mask]
+        loss = loss[mask]
         flow_loss = loss.mean()
         total_loss = flow_loss
 
@@ -441,7 +331,7 @@ class CFM(nn.Module):
             aux_mel_kwargs = {}
             if self.aux_mel_loss_masked:
                 aux_mel_kwargs.update(
-                    frame_mask=rand_span_mask,
+                    frame_mask=mask,
                     frame_lengths=lens,
                 )
 
@@ -451,11 +341,11 @@ class CFM(nn.Module):
                 **aux_mel_kwargs,
             )
             total_loss = total_loss + aux_mel_loss
-            
+
         loss_dict = {
             "total_loss": total_loss,
             "flow_loss": flow_loss,
             "aux_mel_loss": aux_mel_loss,
         }
 
-        return total_loss, cond, v_pred, loss_dict
+        return total_loss, loss_dict
