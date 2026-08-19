@@ -159,3 +159,7 @@ data/LibriTTS_100_360_500_char/raw.arrow
 /data/LibriSpeech
 /data/LibriTTS_100_360_500_char
 /data/seedtts_testset
+
+# local training artifacts
+/data/LibriTTS_100
+/ckpts/*/

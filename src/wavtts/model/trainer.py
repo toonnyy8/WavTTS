@@ -82,6 +82,7 @@ class Trainer:
         wandb_project="test_wavtts",
         wandb_run_name="test_run",
         wandb_resume_id: str = None,
+        log_per_updates: int = 1,  # scalar logging interval (loss/lr), in updates
         log_samples: bool = False,
         log_samples_seeds: list[int] | None = None,  # fixed seeds: clips comparable across checkpoints
         log_samples_sec: float = 5.0,
@@ -96,6 +97,7 @@ class Trainer:
 
         if logger == "wandb" and not wandb.api.api_key:
             logger = None
+        self.log_per_updates = max(1, int(log_per_updates))
         self.log_samples = log_samples
         self.log_samples_seeds = list(log_samples_seeds) if log_samples_seeds is not None else [0, 1, 2, 3]
         self.log_samples_sec = log_samples_sec
@@ -416,7 +418,7 @@ class Trainer:
                         loss=loss.item()
                     )
 
-                if self.accelerator.is_local_main_process:
+                if self.accelerator.is_local_main_process and global_update % self.log_per_updates == 0:
                     self.accelerator.log(
                         {"loss": loss.item(), "lr": self.scheduler.get_last_lr()[0]}, step=global_update
                     )
@@ -440,61 +442,68 @@ class Trainer:
                 if global_update % self.save_per_updates == 0 and self.accelerator.sync_gradients:
                     self.save_checkpoint(global_update)
 
-                    if self.log_samples and self.accelerator.is_local_main_process:
-                        from wavtts.train.metrics import clipping_rate, mel_figure, rms, silence_ratio
+                # samples and metrics ride along with model_last.pt, so quality is visible
+                # at every last-checkpoint interval, not only at the numbered ones
+                if (
+                    global_update % self.last_per_updates == 0
+                    and self.accelerator.sync_gradients
+                    and self.log_samples
+                    and self.accelerator.is_local_main_process
+                ):
+                    from wavtts.train.metrics import clipping_rate, mel_figure, rms, silence_ratio
 
-                        unwrap = self.accelerator.unwrap_model(self.model)
-                        gen_len = int(self.log_samples_sec * target_sample_rate)
+                    unwrap = self.accelerator.unwrap_model(self.model)
+                    gen_len = int(self.log_samples_sec * target_sample_rate)
 
-                        # same seeds and duration at every checkpoint: each seed's clip is
-                        # directly comparable across training updates
-                        gen_audios = {}
-                        with torch.inference_mode():
-                            for gen_seed in self.log_samples_seeds:
-                                generated, _ = unwrap.sample(
-                                    duration=gen_len,
-                                    steps=32,
-                                    cfg_strength=2.0,
-                                    sway_sampling_coef=-1.0,
-                                    seed=gen_seed,
-                                )
-                                gen_audios[gen_seed] = generated.to(torch.float32).cpu()  # [1, N_gen]
-
-                        scores = {"utmos": [], "silence_ratio": [], "clipping_rate": [], "rms": [], "spk_sim_self": []}
-                        for gen_seed, gen_audio in gen_audios.items():
-                            torchaudio.save(
-                                f"{log_samples_path}/update_{global_update}_seed{gen_seed}.wav",
-                                gen_audio,
-                                target_sample_rate,
+                    # same seeds and duration at every checkpoint: each seed's clip is
+                    # directly comparable across training updates
+                    gen_audios = {}
+                    with torch.inference_mode():
+                        for gen_seed in self.log_samples_seeds:
+                            generated, _ = unwrap.sample(
+                                duration=gen_len,
+                                steps=32,
+                                cfg_strength=2.0,
+                                sway_sampling_coef=-1.0,
+                                seed=gen_seed,
                             )
-                            wav_1d = gen_audio[0]
-                            scores["silence_ratio"].append(silence_ratio(wav_1d))
-                            scores["clipping_rate"].append(clipping_rate(wav_1d))
-                            scores["rms"].append(rms(wav_1d))
-                            utmos_score = gen_metrics.utmos(wav_1d, self.accelerator.device)
-                            if utmos_score is not None:
-                                scores["utmos"].append(utmos_score)
-                            spk_sim = gen_metrics.spk_sim_self(wav_1d, self.accelerator.device)
-                            if spk_sim is not None:
-                                scores["spk_sim_self"].append(spk_sim)
+                            gen_audios[gen_seed] = generated.to(torch.float32).cpu()  # [1, N_gen]
 
-                            if self.logger == "tensorboard":
-                                self.writer.add_audio(
-                                    f"gen/audio_seed{gen_seed}",
-                                    gen_audio,
-                                    global_update,
-                                    sample_rate=target_sample_rate,
-                                )
-                                self.writer.add_figure(
-                                    f"gen/mel_seed{gen_seed}", mel_figure(wav_1d, target_sample_rate), global_update
-                                )
+                    scores = {"utmos": [], "silence_ratio": [], "clipping_rate": [], "rms": [], "spk_sim_self": []}
+                    for gen_seed, gen_audio in gen_audios.items():
+                        torchaudio.save(
+                            f"{log_samples_path}/update_{global_update}_seed{gen_seed}.wav",
+                            gen_audio,
+                            target_sample_rate,
+                        )
+                        wav_1d = gen_audio[0]
+                        scores["silence_ratio"].append(silence_ratio(wav_1d))
+                        scores["clipping_rate"].append(clipping_rate(wav_1d))
+                        scores["rms"].append(rms(wav_1d))
+                        utmos_score = gen_metrics.utmos(wav_1d, self.accelerator.device)
+                        if utmos_score is not None:
+                            scores["utmos"].append(utmos_score)
+                        spk_sim = gen_metrics.spk_sim_self(wav_1d, self.accelerator.device)
+                        if spk_sim is not None:
+                            scores["spk_sim_self"].append(spk_sim)
 
-                        metric_log = {f"gen/{k}": sum(v) / len(v) for k, v in scores.items() if len(v) > 0}
-                        self.accelerator.log(metric_log, step=global_update)
                         if self.logger == "tensorboard":
-                            for k, v in metric_log.items():
-                                self.writer.add_scalar(k, v, global_update)
-                        self.model.train()
+                            self.writer.add_audio(
+                                f"gen/audio_seed{gen_seed}",
+                                gen_audio,
+                                global_update,
+                                sample_rate=target_sample_rate,
+                            )
+                            self.writer.add_figure(
+                                f"gen/mel_seed{gen_seed}", mel_figure(wav_1d, target_sample_rate), global_update
+                            )
+
+                    metric_log = {f"gen/{k}": sum(v) / len(v) for k, v in scores.items() if len(v) > 0}
+                    self.accelerator.log(metric_log, step=global_update)
+                    if self.logger == "tensorboard":
+                        for k, v in metric_log.items():
+                            self.writer.add_scalar(k, v, global_update)
+                    self.model.train()
 
         self.save_checkpoint(global_update, last=True)
 

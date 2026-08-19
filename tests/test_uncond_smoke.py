@@ -173,6 +173,34 @@ def test_collate_wav_only():
     assert torch.equal(out["wav"][1, 800:], torch.zeros(200))
 
 
+def test_dataset_normalizes_loudness(tmp_path):
+    import torchaudio
+
+    from wavtts.model.dataset import CustomDataset
+
+    t = torch.linspace(0, 1, 16000)
+    signals = {
+        "loud": 0.8 * torch.sin(2 * torch.pi * 220 * t),
+        "quiet": 0.01 * torch.sin(2 * torch.pi * 220 * t),
+        "peaky": torch.zeros(16000).index_fill_(0, torch.arange(0, 16000, 400), 1.0),  # high crest factor
+    }
+    rows = []
+    for name, wav in signals.items():
+        path = tmp_path / f"{name}.wav"
+        torchaudio.save(str(path), wav.unsqueeze(0), 16000)
+        rows.append({"audio_path": str(path), "duration": 1.0})
+
+    ds = CustomDataset(rows, durations=[1.0] * len(rows), target_rms=0.1)
+    for i in range(len(rows)):
+        wav = ds[i]["wav"]
+        assert wav.abs().max() <= 0.99 + 1e-6
+        rms = wav.pow(2).mean().sqrt().item()
+        assert rms == pytest.approx(0.1, abs=0.02) or wav.abs().max() == pytest.approx(0.99, abs=1e-3)
+
+    off = CustomDataset(rows, durations=[1.0] * len(rows), target_rms=0.0)
+    assert off[0]["wav"].pow(2).mean().sqrt().item() == pytest.approx(0.8 / 2**0.5, abs=0.01)
+
+
 def test_config_instantiates_model_and_trains_one_step():
     from importlib.resources import files as pkg_files
 

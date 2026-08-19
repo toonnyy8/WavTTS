@@ -37,28 +37,32 @@ Design documents live under [`docs/superpowers/specs/`](docs/superpowers/specs/)
 
 ## ⚙️ Installation
 
+Managed with [uv](https://docs.astral.sh/uv/) — `uv.lock` pins the whole environment.
+
 ```bash
 git clone https://github.com/toonnyy8/WavTTS
 cd WavTTS
 
-conda create -n wavtts python=3.10
-conda activate wavtts
-
-# PyTorch (>=2.2.0) with CUDA support, e.g.
-pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-
-# editable install ([dev] adds pytest)
-pip install -e ".[dev]"
+uv sync                 # creates .venv from uv.lock, incl. the dev group (pytest)
+uv sync --extra eval    # add the (unmaintained) upstream eval deps
+uv add <package>        # add a dependency: updates pyproject.toml + uv.lock + .venv
 ```
+
+Run anything through `uv run` (e.g. `uv run pytest`), or activate `.venv` directly.
 
 ## 🏋️ Training
 
 Prepare a raw-waveform dataset (e.g., [Emilia](https://huggingface.co/datasets/amphion/Emilia-Dataset)) with the scripts under `src/wavtts/train/datasets/`, then:
 
 ```bash
-accelerate config
-accelerate launch src/wavtts/train/train.py --config-name WavTTS.yaml
+# single GPU works out of the box; run `uv run accelerate config` for multi-GPU
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  uv run accelerate launch --mixed_precision bf16 src/wavtts/train/train.py --config-name WavTTS.yaml
 ```
+
+`WavTTS.yaml` (664.5M params) is tuned for a single 24 GB GPU: bf16, 3200 frames/GPU ×6 grad-accum
+(= 19200 frames/update, ~22 GiB, 1.25 s/update on an RTX 4090). With more GPUs, raise
+`batch_size_per_gpu` and drop `grad_accumulation_steps` accordingly. `WavTTS_small.yaml` (22.9M) is the quick sanity-check run.
 
 Key config entries in `src/wavtts/configs/WavTTS.yaml`:
 
@@ -75,7 +79,7 @@ Key config entries in `src/wavtts/configs/WavTTS.yaml`:
 ### Monitoring
 
 ```bash
-tensorboard --logdir runs
+uv run tensorboard --logdir runs
 ```
 
 At every checkpoint the trainer generates fixed-seed clips and logs audio (`gen/audio_seed{k}`), log-mel images (`gen/mel_seed{k}`), and quality metrics:
@@ -89,7 +93,7 @@ All metrics are fail-safe: they skip (with a warning) rather than interrupt trai
 ## 🎧 Sampling
 
 ```bash
-python src/wavtts/infer/sample_uncond.py \
+uv run python src/wavtts/infer/sample_uncond.py \
   --ckpt ckpts/.../model_last.pt \
   --duration_sec 5 --num 4 \
   --steps 32 --cfg_strength 2.0 \
@@ -102,7 +106,7 @@ Useful flags: `--negative null` (conventional CFG baseline), `--solver dpmpp` (m
 ## ✅ Tests
 
 ```bash
-python -m pytest tests/test_uncond_smoke.py -v
+uv run pytest tests/test_uncond_smoke.py -v
 ```
 
 CPU-only smoke suite covering the mixing math (including the no-leak prefix property), CFG paths, both solvers, seed isolation, metrics, and the CLI end-to-end.
