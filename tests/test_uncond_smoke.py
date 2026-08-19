@@ -195,3 +195,52 @@ def test_config_instantiates_model_and_trains_one_step():
     loss, loss_dict = model(torch.randn(2, 16000) * 0.1)
     assert torch.isfinite(loss)
     loss.backward()
+
+
+def test_sample_uncond_cli(tmp_path):
+    from importlib.resources import files as pkg_files
+
+    import torchaudio
+    from hydra.utils import get_class
+    from omegaconf import OmegaConf
+
+    from wavtts.model import CFM
+
+    # 縮小版 config
+    cfg = OmegaConf.load(str(pkg_files("wavtts").joinpath("configs/WavTTS.yaml")))
+    cfg.model.arch.dim = 64
+    cfg.model.arch.depth = 2
+    cfg.model.arch.heads = 2
+    cfg_path = tmp_path / "tiny.yaml"
+    OmegaConf.save(cfg, str(cfg_path))
+
+    # 對應的隨機權重 checkpoint
+    arch = OmegaConf.to_container(cfg.model.arch, resolve=True)
+    model_cls = get_class(f"wavtts.model.{cfg.model.backbone}")
+    model = CFM(
+        transformer=model_cls(**arch, wav_frame_len=cfg.model.waveform.wav_frame_len),
+        waveform_kwargs=OmegaConf.to_container(cfg.model.waveform, resolve=True),
+        **OmegaConf.to_container(cfg.model.cfm, resolve=True),
+    )
+    ckpt_path = tmp_path / "model.pt"
+    torch.save({"model_state_dict": model.state_dict()}, str(ckpt_path))
+
+    from wavtts.infer.sample_uncond import main
+
+    out_dir = tmp_path / "out"
+    main(
+        [
+            "--ckpt", str(ckpt_path),
+            "--config", str(cfg_path),
+            "--duration_sec", "0.5",
+            "--num", "2",
+            "--steps", "2",
+            "--seed", "0",
+            "--out_dir", str(out_dir),
+        ]
+    )
+    wav_files = sorted(out_dir.glob("*.wav"))
+    assert len(wav_files) == 2
+    info = torchaudio.info(str(wav_files[0]))
+    assert info.num_frames == 8000  # 0.5s @ 16k
+    assert info.sample_rate == 16000
